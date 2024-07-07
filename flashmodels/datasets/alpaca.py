@@ -16,9 +16,10 @@
 
 import copy
 import logging
-import os
+import os, sys
 from dataclasses import dataclass
 from typing import Dict, Sequence
+import torch.nn.functional as F
 
 import torch
 import transformers
@@ -124,7 +125,8 @@ class SupervisedDataset(Dataset):
 
     def __init__(self, data_path: str,
                  tokenizer: transformers.PreTrainedTokenizer,
-                 padding_strategy: str):
+                 padding_strategy: str,
+                 max_seq_length: int):
         super(SupervisedDataset, self).__init__()
         self.tokenizer = tokenizer
         logging.warning("Loading data...")
@@ -161,6 +163,8 @@ class DataCollatorForSupervisedDataset(object):
     """Collate examples for supervised fine-tuning."""
 
     tokenizer: transformers.PreTrainedTokenizer
+    padding_strategy: str
+    max_seq_length:int
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids, labels = tuple([instance[key]
@@ -172,11 +176,34 @@ class DataCollatorForSupervisedDataset(object):
             padding_value=self.tokenizer.pad_token_id)
         labels = torch.nn.utils.rnn.pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX)
+        if self.padding_strategy == "longest":
+            longest_len = input_ids.shape[-1]
+            print(f'longest_len={longest_len}')
+            bucket_sizes = [64, 128, 192, 256, 512, 1024] # (wenting.swt): this is tricky..
+            # bucket_sizes = [self.max_seq_length // 4 * (i + 1) for i in range(4)]
+            bucket_data_length = _get_bucket(bucket_sizes, longest_len)
+            # print(f'bucket_data_length={bucket_data_length}')
+            input_ids = F.pad(input_ids, (0, bucket_data_length - longest_len), 'constant',
+                          self.tokenizer.pad_token_id)
+            labels = F.pad(labels, (0, bucket_data_length - longest_len), 'constant', IGNORE_INDEX)
+            print(f'input_ids.size={input_ids.size()}')
         return dict(
             input_ids=input_ids,
             labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            attention_mask=input_ids.ne(self.tokenizer.pad_token_id)
         )
+
+def _get_bucket(bucket_sizes, data_length):
+    cloest_length = sys.maxsize
+    for b in bucket_sizes:
+        if b == data_length or ((b < cloest_length) and (b > data_length)):
+            cloest_length = b
+
+    if cloest_length == sys.maxsize:
+        bucket_sizes.append(data_length)
+        cloest_length = data_length
+
+    return cloest_length
 
 
 def get_alpaca_loader(model, tokenizer, args):
@@ -200,8 +227,11 @@ def get_alpaca_loader(model, tokenizer, args):
     train_dataset = SupervisedDataset(
         tokenizer=tokenizer,
         data_path=args.dataset_name_or_path,
-        padding_strategy=args.padding_strategy)
-    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+        padding_strategy=args.padding_strategy,
+        max_seq_length=args.max_seq_length)
+    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer,
+                                                     padding_strategy=args.padding_strategy,
+                                                     max_seq_length=args.max_seq_length)
     train_sampler = None
     data_num_replicas = args.fsdp_num * args.dp_num
     if args.pp_num > 1:
@@ -223,6 +253,7 @@ def get_alpaca_loader(model, tokenizer, args):
         bs *= args.dp_num
     if args.pp_num > 1:
         bs *= args.gradient_accumulation_steps
+
     loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=bs,

@@ -18,7 +18,10 @@ DP_NUM=1            # data parallelism number
 PP_NUM=1            # pipeline parallelism number
 TP_NUM=1            # tensor parallelism number
 FSDP_NUM=1          # fsdp number
-DATA=./data/wikitext-2-raw-v1.json               # data name or path
+# DATA=./data/wikitext-2-raw-v1_sample.json               # data name or path
+DATA=./data/alpaca_data_sample.json
+# DATA=./data/openwebtext-10k.json
+# DATA=./data/CodeExercise-Python-27k.json
 MODEL_NAME_OR_PATH="./hf_models/config/llama-1b" # model name or path
 USE_FLASH_ATTN=1
 
@@ -165,7 +168,7 @@ if [ "$TP_NUM" -gt "1" ]; then
     export XLA_USE_SPMD=1
 fi
 
-export XLA_PERSISTENT_CACHE_PATH=./compiled_cache/
+# export XLA_PERSISTENT_CACHE_PATH=./compiled_cache/
 
 MODEL_NAME=$(basename $MODEL_NAME_OR_PATH)
 JOB_NAME="${MODEL_NAME}_${ACCELERATOR}_bs${MBS}_seqlen${SEQLEN}_bf16-${BF16}_fp16-${FP16}_pp${PP_NUM}_tp${TP_NUM}_fsdp${FSDP_NUM}"
@@ -174,7 +177,7 @@ JOB_NAME="${MODEL_NAME}_${ACCELERATOR}_bs${MBS}_seqlen${SEQLEN}_bf16-${BF16}_fp1
 [ -z "$RANK" ] && RANK=0
 [ -z "$WORLD_SIZE" ] && WORLD_SIZE=1
 [ -z "$MASTER_ADDR" ] && MASTER_ADDR=127.0.0.1
-[ -z "$MASTER_PORT" ] && MASTER_PORT=9010
+[ -z "$MASTER_PORT" ] && MASTER_PORT=9017
 
 if [ "$WORLD_SIZE" -eq 1 ]; then
     NPROC_PER_NODE=$((FSDP_NUM * TP_NUM * PP_NUM * DP_NUM))
@@ -205,3 +208,5 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
         $OPTION_ARGS \
         $OTHER_ARGS \
         --log_interval $LOG_INTERVAL 2>&1 | tee ./log/${JOB_NAME}.log ; exit ${PIPESTATUS[0]}
+
+# --padding_strategy "longest" \
