@@ -75,7 +75,11 @@ class Trainer(object):
              step,
              epoch,
              loss=0.0,
-             maybe_mark_step=(lambda *args: None)):
+             maybe_mark_step=(lambda *args: None),
+             bucket_size=0,
+             longest=0,
+             total_tokens=0,
+             start_time=0):
         if self.args.log_loss:
             maybe_mark_step()
         else:
@@ -87,13 +91,14 @@ class Trainer(object):
               self.args.micro_batch_size * self.args.gradient_accumulation_steps \
                   / time_each_step)
             samples_per_step = samples_per_step * self.args.fsdp_num * self.args.dp_num
+            tokens_per_sec_per_gpu = float(total_tokens / (time.time() - start_time))
             begin_time = time.time()
             train_format_string = "[TRAIN] {{epoch: {}, iteration: {}, batch_size: {}," \
-                " loss: {:.8f}, throughput: {:.2f} samples/sec}}"
+                " loss: {:.8f}, throughput: {:.2f} samples/sec, {:.2f} tokens/sec/gpu, bucket_size: {}, longest: {}}}"
             logger.info(
                 train_format_string.format(
                     epoch, int(step / self.gradient_accumulation_steps),
-                    self.args.micro_batch_size, loss, samples_per_step))
+                    self.args.micro_batch_size, loss, samples_per_step, tokens_per_sec_per_gpu,                    bucket_size, longest))
         return begin_time
 
     def train(self):
@@ -181,8 +186,25 @@ class Trainer(object):
         max_step = last_step
         total_loss = torch.tensor(0.0).to(self.device)
 
-        def _step(begin, step, batch):
+        def _step(begin, step, batch, total_tokens, start_time):
             found_inf = None
+            if batch.get("tokens") is not None:
+                total_tokens += int(batch["tokens"])
+                print(f'total_token={total_tokens}')
+                del batch["tokens"]
+            if batch.get("longest") is not None:
+                longest = batch["longest"]
+                del batch["longest"]
+            else:
+                longest = 0
+                print("no longest")
+            if batch.get("bucket_size") is not None:
+                bucket_size = batch["bucket_size"]
+                del batch["bucket_size"]
+            else:
+                bucket_size = 0
+                print("no bucket_size")
+
             if self.args.force_use_syncfree_adam:
                 found_inf = torch.tensor(
                     0, dtype=torch.float, device=self.device)
@@ -232,13 +254,13 @@ class Trainer(object):
                 self.optimizer.zero_grad()
             if step % (self.args.log_interval *
                        self.gradient_accumulation_steps) == 0:
-                begin = self._log(begin, step, epoch, total_loss, ta.mark_step)
+                begin = self._log(begin, step, epoch, total_loss, ta.mark_step, bucket_size=bucket_size, longest=longest, total_tokens=total_tokens, start_time=start_time)
             if step > last_step and len(self.args.ckpt_dir) > 0 and step % (
                     self.args.ckpt_freq) == 0:
                 self._acc_save(step)
             if step % self.gradient_accumulation_steps == 0:
                 total_loss.zero_()
-            return begin
+            return begin, total_tokens
 
         loader = ta.AsyncLoader(self.loader, self.device)
         if self.args.tp_num > 1 and self.args.dp_num > 1 and not self.args.pp_num > 1:
@@ -253,8 +275,10 @@ class Trainer(object):
         for epoch in range(0, self.args.num_train_epochs):
             self.model.train()
             begin = time.time()
+            start_time = time.time()
+            total_tokens = 0
             for step, batch in enumerate(loader):
-                begin = _step(begin, step + 1, batch)
+                begin, total_tokens = _step(begin, step + 1, batch, total_tokens, start_time)
                 max_step += 1
                 if max_step == self.args.max_train_steps * self.gradient_accumulation_steps:
                     ta.mark_step()

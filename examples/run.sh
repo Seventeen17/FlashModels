@@ -19,9 +19,10 @@ PP_NUM=1            # pipeline parallelism number
 TP_NUM=1            # tensor parallelism number
 FSDP_NUM=1          # fsdp number
 # DATA=./data/wikitext-2-raw-v1_sample.json               # data name or path
-DATA=./data/alpaca_data_sample.json
+#DATA=./data/alpaca_data_sample.json
 # DATA=./data/openwebtext-10k.json
 # DATA=./data/CodeExercise-Python-27k.json
+DATA=./data/code_alpaca.parquet
 MODEL_NAME_OR_PATH="./hf_models/config/llama-1b" # model name or path
 USE_FLASH_ATTN=1
 
@@ -205,6 +206,7 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
         --tp_num $TP_NUM \
         --fsdp_num $FSDP_NUM \
         --gradient_accumulation_steps $GA \
+        --padding_strategy "longest" \
         $OPTION_ARGS \
         $OTHER_ARGS \
         --log_interval $LOG_INTERVAL 2>&1 | tee ./log/${JOB_NAME}.log ; exit ${PIPESTATUS[0]}

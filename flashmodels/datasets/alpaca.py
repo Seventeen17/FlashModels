@@ -28,6 +28,8 @@ from torch.utils.data import Dataset
 from flashmodels.logger import logger
 from flashmodels.utils import jload
 
+import pandas as pd
+
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
 DEFAULT_EOS_TOKEN = "</s>"
@@ -130,7 +132,9 @@ class SupervisedDataset(Dataset):
         super(SupervisedDataset, self).__init__()
         self.tokenizer = tokenizer
         logging.warning("Loading data...")
-        list_data_dict = jload(data_path)
+        list_data_dict = self.load_alpaca_long(data_path)
+        if list_data_dict is None:
+            list_data_dict = jload(data_path)
 
         logging.warning("Formatting inputs...")
         prompt_input, prompt_no_input = PROMPT_DICT[
@@ -151,6 +155,22 @@ class SupervisedDataset(Dataset):
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
 
+        print("check type of input_ids: ", type(self.input_ids), "\tAnd types of labels: ", type(self.labels))
+
+    def load_alpaca_long(self, data_path: str):
+        if "parquet" not in data_path:
+            return None
+        data_frame = pd.read_parquet(data_path)
+        column_names_list = list(data_frame.keys())
+        list_data_dict = []
+        def process(row):
+            result_dict = {}
+            for idx, name in enumerate(column_names_list):
+                result_dict[name] = row[idx]
+            list_data_dict.append(result_dict)
+        data_frame.apply(process, axis=1)
+        return list_data_dict
+
     def __len__(self):
         return len(self.input_ids)
 
@@ -158,6 +178,7 @@ class SupervisedDataset(Dataset):
         return dict(input_ids=self.input_ids[i], labels=self.labels[i])
 
 
+padding_ratio = []
 @dataclass
 class DataCollatorForSupervisedDataset(object):
     """Collate examples for supervised fine-tuning."""
@@ -176,23 +197,40 @@ class DataCollatorForSupervisedDataset(object):
             padding_value=self.tokenizer.pad_token_id)
         labels = torch.nn.utils.rnn.pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX)
+        longest = input_ids.shape[-1]
+        bucket_data_length = longest
         if self.padding_strategy == "longest":
             longest_len = input_ids.shape[-1]
-            print(f'longest_len={longest_len}')
-            bucket_sizes = [64, 128, 192, 256, 512, 1024] # (wenting.swt): this is tricky..
+            #print(f'longest_len={longest_len}')
+            #bucket_sizes = [64, 128, 192, 256, 512, 1024] # (wenting.swt): this is tricky..
             # bucket_sizes = [self.max_seq_length // 4 * (i + 1) for i in range(4)]
-            bucket_data_length = _get_bucket(bucket_sizes, longest_len)
+            #bucket_data_length = _get_bucket(bucket_sizes, longest_len)
+            bucket_data_length = _get_padded_prefill_len(longest_len)
             # print(f'bucket_data_length={bucket_data_length}')
             input_ids = F.pad(input_ids, (0, bucket_data_length - longest_len), 'constant',
                           self.tokenizer.pad_token_id)
             labels = F.pad(labels, (0, bucket_data_length - longest_len), 'constant', IGNORE_INDEX)
-            print(f'input_ids.size={input_ids.size()}')
+            padding_ratio.append((bucket_data_length - longest_len) / bucket_data_length)
+            print("Average padding ratio ", sum(padding_ratio) / len(padding_ratio))
+            #print(f'input_ids.size={input_ids.size()}')
+        attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
         return dict(
             input_ids=input_ids,
             labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id)
+            attention_mask=attention_mask,
+            tokens=attention_mask.flatten().sum().item(),
+            bucket_size=bucket_data_length,
+            longest=longest
         )
 
+
+def _get_padded_prefill_len(x: int) -> int:
+    # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence
+    # length to be a multiple of 16. We pad the prompt length to the nearest
+    # multiple of 16. This is also good for performance.
+    if x <= 16:
+        return 16
+    return 1 << (x - 1).bit_length()
 def _get_bucket(bucket_sizes, data_length):
     cloest_length = sys.maxsize
     for b in bucket_sizes:
